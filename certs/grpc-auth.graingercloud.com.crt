@@ -1,0 +1,11 @@
+PLACEHOLDER  (replace the contents of this file with your public prod cert)
+
+Applying for an SSL Certificate:
+
+* Application Form: https://gprod.service-now.com/grainger/?id=catalogitem&sys_id=4f3a21d4fd7a4200709dffa3ab5ef9db
+
+* How-to: https://confluence.grainger.com/display/PLE/PKI+-+How+To+Procure+A+Grainger+Certificate
+
+Installing your SSL Certificate:
+
+* https://confluence.grainger.com/display/PLE/HTTPS+Setup+-+Terminating+SSL+Using+Istio+Ingress+Gateway+and+IngressSecrets

@@ -1,0 +1,188 @@
+---
+version: 2.1
+
+variables:
+  - &nonprod-aws-region us-east-1
+  - &prod-aws-region us-east-1
+  - &team productcore
+  - &appname grpc-auth
+  - &circle-ci-context
+    context: grainger-apps-global
+  - &circle-ci-service-account
+    circle-ci-service-account: $SERVICE_USER_PRODUCTCORE
+
+orbs:
+  app-release: wwgrainger/app-release@6
+  common-tasks: wwgrainger/common-pipeline-tasks@5
+  compliance: wwgrainger/compliance-tasks@2
+  metrics: wwgrainger/metrics-tasks@2
+  go: circleci/go@1.6.0
+
+# yaml anchor filters
+branch-master-filter: &branch-master-filter
+  branches:
+    only: /main/
+  tags:
+    ignore: /.*/
+
+rc-filter: &rc-filter
+  branches:
+    ignore: /.*/
+  tags:
+    only: /^\d+\.\d+\.\d+-rc\d+$/
+
+release-filter: &release-filter
+  branches:
+    ignore: /.*/
+  tags:
+    only:
+      - /^\d+\.\d+\.\d+(?!-rc\d*)$/
+
+all-tags-filter: &all-tags-filter
+  tags:
+    only: /.*/
+
+jobs:
+  build:
+    executor:
+      name: go/default
+      tag: "1.16"
+    steps:
+      - checkout
+      - go/load-cache
+      - go/mod-download
+      - go/save-cache
+workflows:
+  version: 2
+  # On master push workflow
+  dev-release:
+    jobs:
+      - build
+      - app-release/build-and-push-image:
+          name: Build and Publish Application Image
+          <<: *circle-ci-context
+          <<: *circle-ci-service-account
+          team-name: *team
+          filters: *branch-master-filter
+      - app-release/deploy:
+          name: dev-deploy
+          appname: *appname
+          team-name: *team
+          aws-region: *nonprod-aws-region
+          <<: *circle-ci-service-account
+          cluster-name: di-nonprod-cluster
+          <<: *circle-ci-context
+          run-post-deploy-tests: false
+          after-deploy:
+            - run-custom-tests:
+                appname: *appname
+          environment: dev
+          requires:
+            - Build and Publish Application Image
+      - approve-rc-bump:
+          name: approve QA promotion
+          type: approval
+          <<: *circle-ci-context
+          requires:
+            - dev-deploy
+      - app-release/tag-release-candidate:
+          name: promote to QA
+          <<: *circle-ci-context
+          <<: *circle-ci-service-account
+          vault-bitbucket-key-path: "productcore/bitbucket"
+          requires:
+            - approve QA promotion
+
+  qa-release:
+    jobs:
+      - app-release/promote-image-with-tag:
+          name: publish release candidate
+          team-name: *team
+          <<: *circle-ci-service-account
+          <<: *circle-ci-context
+          filters: *rc-filter
+      - app-release/deploy:
+          name: qa-deploy
+          appname: *appname
+          team-name: *team
+          aws-region: *nonprod-aws-region
+          <<: *circle-ci-service-account
+          cluster-name: di-nonprod-cluster
+          <<: *circle-ci-context
+          environment: qa
+          filters: *all-tags-filter
+          image-tag: $CIRCLE_TAG
+          requires:
+            - publish release candidate
+      - approve-release-version-bump:
+          name: approve prod promotion
+          type: approval
+          <<: *circle-ci-context
+          filters: *all-tags-filter
+          requires:
+            - qa-deploy
+      - app-release/tag-release:
+          name: promote to prod
+          <<: *circle-ci-context
+          filters: *all-tags-filter
+          <<: *circle-ci-service-account
+          vault-bitbucket-key-path: "productcore/bitbucket"
+          requires:
+            - approve prod promotion
+
+  prod-release:
+    jobs:
+      - approve-prod-deploy:
+          type: approval
+          filters: *release-filter
+      - app-release/promote-image-with-tag:
+          name: publish release candidate
+          team-name: *team
+          <<: *circle-ci-service-account
+          <<: *circle-ci-context
+          filters: *rc-filter
+          requires:
+            - approve-prod-deploy
+      - app-release/deploy:
+          name: prod-deploy
+          appname: *appname
+          team-name: *team
+          aws-region: *prod-aws-region
+          <<: *circle-ci-service-account
+          cluster-name: di-prod-cluster
+          <<: *circle-ci-context
+          environment: prod
+          filters: *all-tags-filter
+          image-tag: $CIRCLE_TAG
+          requires:
+            - approve-prod-deploy
+            - publish release candidate
+      - metrics/send-throughput-metrics-to-splunk:
+          <<: *circle-ci-context
+          requires:
+            - prod-deploy
+          <<: *circle-ci-service-account
+          team-name: *team
+
+commands:
+  run-custom-tests:
+    description: runs custom post deployment tests
+    parameters:
+      image-tag:
+        description: image tag to be used when deploying
+        default: $CIRCLE_SHA1
+        type: string
+      appname:
+        description: application or service name
+        type: string
+    steps:
+      - run:
+          name: smoke test app connectivity
+          working_directory: test/deployment
+          command: |
+            python -VV
+            export TESTUTIL_NAMESPACE=$NAMES_NAMESPACE
+            export TESTUTIL_FQDN=$NAMES_FQDN
+            export TESTUTIL_APP_NAME="<< parameters.appname >>"
+            export TESTUTIL_APP_VERSION="<< parameters.image-tag >>"
+            pytest -svv test_deployment.py
