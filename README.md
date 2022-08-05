@@ -1,3 +1,7 @@
+build docker image
+(if using kind) load the image
+kubectl apply the deployment
+
 example envoy filter
 
 ```
